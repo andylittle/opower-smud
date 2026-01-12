@@ -5,7 +5,7 @@ import json
 import logging
 from datetime import date, datetime
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlencode
 
 import aiohttp
@@ -238,6 +238,24 @@ class Opower:
                 )
         return accounts
 
+    @staticmethod
+    def _get_forecast_field(segment: dict[str, Any], field_name: str) -> dict[str, Any]:
+        """Get a forecast field from segment, handling null values with warnings.
+
+        Args:
+            segment: The forecast segment dictionary
+            field_name: The name of the field to extract
+
+        Returns:
+            The field value or empty dict if null
+
+        """
+        field_value = segment.get(field_name)
+        if field_value is None:
+            _LOGGER.warning("Utility returned null for %s in forecast data", field_name)
+            return {}
+        return cast("dict[str, Any]", field_value)
+
     async def async_get_forecast(self) -> list[Forecast]:
         """Get current and forecasted usage and cost for the current monthly bill.
 
@@ -312,7 +330,9 @@ class Opower:
 
                 # Process each segment (typically one per meter type)
                 for segment in bill_forecast.get("segments", []):
-                    service_type = segment.get("serviceAgreement", {}).get("serviceType", "")
+                    # Handle null fields with warnings
+                    service_agreement = self._get_forecast_field(segment, "serviceAgreement")
+                    service_type = service_agreement.get("serviceType", "")
 
                     # Map GraphQL service type to MeterType
                     service_type_map = {"ELECTRICITY": MeterType.ELEC, "GAS": MeterType.GAS}
@@ -321,8 +341,9 @@ class Opower:
                         _LOGGER.debug("Unknown service type: %s", service_type)
                         continue
 
-                    # Get unit of measure from segment
-                    unit_str = segment.get("estimatedUsage", {}).get("unit", "KWH")
+                    # Get unit of measure from segment, handling null estimatedUsage
+                    estimated_usage = self._get_forecast_field(segment, "estimatedUsage")
+                    unit_str = estimated_usage.get("unit", "KWH")
                     try:
                         unit_of_measure = UnitOfMeasure(unit_str)
                     except ValueError:
@@ -331,6 +352,13 @@ class Opower:
 
                     # Use utility_account_id as id if available, otherwise use uuid
                     account_id = utility_account_id if utility_account_id else account_uuid
+
+                    # Handle null values for all forecast fields with warnings
+                    so_far_usage = self._get_forecast_field(segment, "soFarUsage")
+                    so_far_charges = self._get_forecast_field(segment, "soFarUsageCharges")
+                    estimated_charges = self._get_forecast_field(segment, "estimatedUsageCharges")
+                    prior_year_usage = self._get_forecast_field(segment, "priorYearUsage")
+                    prior_year_charges = self._get_forecast_field(segment, "priorYearUsageCharges")
 
                     forecasts.append(
                         Forecast(
@@ -346,12 +374,12 @@ class Opower:
                             end_date=end_date,
                             current_date=current_date,
                             unit_of_measure=unit_of_measure,
-                            usage_to_date=float(segment.get("soFarUsage", {}).get("value", 0)),
-                            cost_to_date=float(segment.get("soFarUsageCharges", {}).get("value", 0)),
-                            forecasted_usage=float(segment.get("estimatedUsage", {}).get("value", 0)),
-                            forecasted_cost=float(segment.get("estimatedUsageCharges", {}).get("value", 0)),
-                            typical_usage=float(segment.get("priorYearUsage", {}).get("value", 0)),
-                            typical_cost=float(segment.get("priorYearUsageCharges", {}).get("value", 0)),
+                            usage_to_date=float(so_far_usage.get("value", 0)),
+                            cost_to_date=float(so_far_charges.get("value", 0)),
+                            forecasted_usage=float(estimated_usage.get("value", 0)),
+                            forecasted_cost=float(estimated_charges.get("value", 0)),
+                            typical_usage=float(prior_year_usage.get("value", 0)),
+                            typical_cost=float(prior_year_charges.get("value", 0)),
                         )
                     )
         return forecasts
